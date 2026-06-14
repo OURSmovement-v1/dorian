@@ -1,0 +1,4 @@
+Raspberry Pi 3B+
+VSDISPLAY Driver HDMI/eDP
+BOE NE156FHM-N27
+Fuente 12V
