@@ -1,0 +1,225 @@
+================================================================================
+  ATMOS — PLAYER ROUTES (API del Dorian Player)
+  Última actualización: junio 2026
+================================================================================
+
+RESUMEN
+-------
+
+Módulo del backend que expone el estado de un dispositivo Dorian para el
+reproductor web (dorian-player). Consulta MySQL (pool primary), devuelve el
+Dorian y su artwork actual, y se monta bajo /api/player en Express.
+
+Ubicación en el repo:
+
+  backend/services/player-routes/
+  ├── index.js                 ← exporta playerRoutes y getDorianPlayerState
+  ├── routes.js                ← router Express (HTTP)
+  └── getDorianPlayerState.js  ← lógica de consulta y mapeo
+
+Registro en el servidor:
+
+  backend/server.js → app.use('/api/player', playerRoutes);
+
+
+================================================================================
+  ENDPOINT
+================================================================================
+
+GET /api/player/:dorianId
+
+  Descripción:
+    Devuelve el estado completo de un Dorian, incluyendo el artwork asignado
+    actualmente (si existe).
+
+  Parámetros:
+    dorianId (path) — entero positivo (ID del dispositivo en tabla dorians)
+
+  Autenticación:
+    Ninguna (endpoint público, pensado para el player en el dispositivo)
+
+  Headers de respuesta:
+    Cache-Control: no-store, no-cache, must-revalidate
+    Pragma: no-cache
+    Expires: 0
+
+  Respuesta 200 (JSON):
+
+    {
+      "dorian": {
+        "id": 1,
+        "userId": 42,
+        "name": "Living room",
+        "model": "...",
+        "size": "...",
+        "orderedAt": "...",
+        "orderId": 10,
+        "currentArtworkId": 5,
+        "isConnected": true,
+        "lastSeenAt": "...",
+        "createdAt": "...",
+        "updatedAt": "...",
+        "currentArtwork": {
+          "id": 5,
+          "userId": 7,
+          "title": "Artwork title",
+          "autorName": "Artist name",
+          "type": "still" | "motion",
+          "device": "...",
+          "artworkUrl": "/atelier_artworks/...",
+          "description": "...",
+          "usagePrice": 0,
+          "reviewStatus": "...",
+          "isPublic": true,
+          "createdAt": "...",
+          "updatedAt": "..."
+        }
+      }
+    }
+
+    Si no hay artwork asignado, currentArtwork es null.
+
+  Errores:
+
+    400 { "error": "invalid dorian id", "code": "invalid_id" }
+        → dorianId no es un entero positivo
+
+    404 { "error": "dorian not found", "code": "not_found" }
+        → no existe fila en dorians con ese id
+
+    400 { "error": "<mensaje>" }
+        → otros errores (p. ej. fallo de base de datos)
+
+
+================================================================================
+  LÓGICA INTERNA (getDorianPlayerState)
+================================================================================
+
+  1. Valida dorianId: Number(dorianId) debe ser entero > 0
+  2. Ejecuta JOIN en poolPrimary:
+       dorians d
+       LEFT JOIN atelier_artworks a ON a.id = d.current_artwork_id
+       WHERE d.id = ?
+  3. Si no hay filas → throw 'dorian not found'
+  4. Mapea la fila SQL a camelCase (mapDorianRow)
+  5. Normaliza type del artwork: solo 'motion' o 'still'
+  6. Convierte is_connected e is_public a boolean
+
+  Export:
+    const { getDorianPlayerState } = require('./services/player-routes');
+    // Reutilizable desde otros servicios si hace falta el mismo estado
+
+
+================================================================================
+  CONSUMO DESDE DORIAN-PLAYER (frontend)
+================================================================================
+
+  Cliente: dorian-player/src/services/playerApi.js
+
+  Función: fetchDorianPlayerState(dorianId, { bustCache = false })
+
+  URL:
+    ${VITE_API_URL}/api/player/${dorianId}
+    Opcional: ?t=<timestamp> si bustCache=true (evita caché del navegador)
+
+  Fetch options:
+    cache: 'no-store'
+
+  Errores de red:
+    Lanza Error con isNetwork=true → HomePage muestra SetupScreen y reintenta
+    cada NETWORK_RETRY_DELAY_MS (3000 ms)
+
+  Uso en la UI:
+    dorian-player/src/pages/HomePage.jsx
+      - Sin ?dorianId → pantalla para introducir ID
+      - Con ?dorianId=123 → PlayerScreen carga estado vía API
+      - Socket.IO (artworkChanged) → vuelve a llamar con bustCache: true
+
+  URL del dispositivo en producción:
+    https://player.atmoshome.io/?dorianId=123
+
+
+================================================================================
+  BASE DE DATOS
+================================================================================
+
+  Tablas implicadas:
+    dorians          — dispositivo; current_artwork_id apunta al artwork activo
+    atelier_artworks — metadata y artwork_url del contenido
+
+  Pool:
+    poolPrimary (DB_NAME_PRIMARY, p. ej. atmos_app)
+
+  Campos clave del Dorian:
+    id, user_id, name, model, size, ordered_at, order_id,
+    current_artwork_id, is_connected, last_seen_at, created_at, updated_at
+
+
+================================================================================
+  RELACIÓN CON SOCKET.IO
+================================================================================
+
+  El endpoint HTTP no mantiene conexión en vivo; solo devuelve snapshot.
+
+  Actualizaciones en tiempo real:
+    - El player se conecta por WebSocket (createPlayerSocket)
+    - Emite register { dorianId }
+    - Escucha artworkChanged → refetch GET /api/player/:dorianId
+
+  El backend de sockets está en backend/services/socket (separado de player-routes).
+
+
+================================================================================
+  DESPLIEGUE Y CORS
+================================================================================
+
+  API en producción:
+    https://api.atmoshome.io/api/player/:dorianId
+
+  Variables del player (dorian-player/.env.production):
+    VITE_API_URL=https://api.atmoshome.io
+    VITE_MEDIA_BASE_URL=https://api.atmoshome.io
+
+  CORS (backend/.env en EC2):
+    ALLOWED_ORIGINS debe incluir https://player.atmoshome.io
+
+  Tras cambiar player-routes en el backend:
+    Subir código y reiniciar API (p. ej. pm2 restart atmos-api)
+    No hace falta rebuild del dorian-player salvo que cambie el contrato JSON
+
+
+================================================================================
+  PRUEBAS RÁPIDAS
+================================================================================
+
+  Local (backend en puerto 3000):
+
+    curl http://localhost:3000/api/player/1
+
+  Producción:
+
+    curl https://api.atmoshome.io/api/player/1
+
+  Casos a verificar:
+    [ ] ID válido con artwork → 200, currentArtwork con artworkUrl
+    [ ] ID válido sin artwork → 200, currentArtwork null
+    [ ] ID no numérico o <= 0 → 400 invalid_id
+    [ ] ID inexistente → 404 not_found
+
+
+================================================================================
+  ARCHIVOS RELACIONADOS
+================================================================================
+
+  Backend:
+    backend/server.js
+    backend/services/player-routes/
+
+  Frontend player:
+    dorian-player/src/services/playerApi.js
+    dorian-player/src/pages/HomePage.jsx
+    dorian-player/src/services/playerSocket.js
+
+  Deploy:
+    deploy-ec2.txt (sección Dorian Player)
+    deploy/nginx/player.atmoshome.io.conf
